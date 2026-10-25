@@ -274,14 +274,3 @@ CartForge/
 * No authentication – anyone using the console can act as any user ID (see *Future improvements*).
 * Prices are a single currency with no tax, shipping or discounts.
 * Orders cannot be cancelled or refunded yet.
-* Console input is line-based; there is no GUI or web front end.
-
-## Future improvements
-
-* REST API layer
-* Authentication and roles
-* Admin dashboard
-* Order cancellation and refunds (restock in a transaction)
-* Payment simulation
-* Docker Compose (app + MySQL) deployment
-* Unit tests with a C++ test framework

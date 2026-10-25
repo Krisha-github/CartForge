@@ -9,7 +9,7 @@ private:
     MYSQL *conn;
 
 public:
-    Cart(MYSQL *connection);
+    explicit Cart(MYSQL *connection);
 
     void addToCart();
     void viewCart();

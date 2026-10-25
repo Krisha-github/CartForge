@@ -9,7 +9,7 @@ private:
     MYSQL *conn;
 
 public:
-    Product(MYSQL *connection);
+    explicit Product(MYSQL *connection);
 
     void addProduct();
     void viewProducts();

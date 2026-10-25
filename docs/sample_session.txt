@@ -1,0 +1,136 @@
+1. Menu and product list
+
+ CartForge 
+ 1. Add Product
+ 2. View Products
+ 3. Search Product
+ 4. Update Product Stock
+ 5. Delete Product
+ 6. Add User
+ 7. View Users
+ 8. Add Product to Cart
+ 9. View Cart
+10. Remove Item from Cart
+11. Place Order
+12. View Order History
+13. Low Stock Report
+14. Total Sales Report
+15. Top Selling Products
+ 0. Exit
+Enter choice: 2
+
+ID  Product            Price  Stock
+--  --------------  --------  -----
+ 1  Laptop          55000.00     10
+ 2  Wireless Mouse    799.00     25
+ 3  Keyboard         1499.00     15
+ 4  Monitor         12000.00      8
+ 5  USB-C Cable       299.00     50
+ 6  Headphones       2499.00     12
+Enter choice: 0
+Exiting CartForge.
+
+
+2. Cart and checkout
+
+Enter choice: 8
+Enter user ID: 1
+Enter product ID: 1
+Enter quantity: 1
+Item added to cart.
+Enter choice: 8
+Enter user ID: 1
+Enter product ID: 2
+Enter quantity: 2
+Item added to cart.
+Enter choice: 9
+Enter user ID: 1
+
+Cart ID  Product         Qty     Price  Subtotal
+-------  --------------  ---  --------  --------
+      1  Laptop            1  55000.00  55000.00
+      2  Wireless Mouse    2    799.00   1598.00
+
+Cart total: 56598.00
+Enter choice: 11
+Enter user ID: 1
+Order placed successfully. Order ID: 1
+Total amount: 56598.00
+Enter choice: 9
+Enter user ID: 1
+(no records)
+
+Cart total: 0.00
+Enter choice: 0
+Exiting CartForge.
+
+
+3. Not enough stock -> transaction rolled back
+
+Enter choice: 8
+Enter user ID: 2
+Enter product ID: 1
+Enter quantity: 5
+Item added to cart.
+Enter choice: 11
+Enter user ID: 2
+Insufficient stock for 'Laptop': requested 5, available 2.
+Transaction rolled back. Nothing was changed.
+Enter choice: 9
+Enter user ID: 2
+
+Cart ID  Product  Qty     Price   Subtotal
+-------  -------  ---  --------  ---------
+      1  Laptop     5  55000.00  275000.00
+
+Cart total: 275000.00
+Enter choice: 2
+
+ID  Product            Price  Stock
+--  --------------  --------  -----
+ 1  Laptop          55000.00      2
+ 2  Wireless Mouse    799.00     25
+ 3  Keyboard         1499.00     15
+ 4  Monitor         12000.00      8
+ 5  USB-C Cable       299.00     50
+ 6  Headphones       2499.00     12
+Enter choice: 0
+Exiting CartForge.
+
+
+4. Order history and reports
+
+Enter choice: 12
+Enter user ID: 1
+
+Order ID  Date                 Product         Qty     Price  Line total
+--------  -------------------  --------------  ---  --------  ----------
+       4  2026-10-25 09:10:35  Monitor           1  12000.00    12000.00
+       1  2026-10-25 09:10:35  Laptop            1  55000.00    55000.00
+       1  2026-10-25 09:10:35  Wireless Mouse    2    799.00     1598.00
+
+Orders: 2   Lifetime spend: 68598.00
+Enter choice: 13
+Enter low stock threshold: 12
+
+Low Stock Products (stock below 12)
+ID  Product     Stock
+--  ----------  -----
+ 4  Monitor         7
+ 1  Laptop          9
+ 6  Headphones     11
+Enter choice: 14
+Orders placed: 4
+Total sales: 73891.00
+Enter choice: 15
+
+Top Selling Products
+Product         Units sold   Revenue
+--------------  ----------  --------
+Wireless Mouse           4   3196.00
+USB-C Cable              4   1196.00
+Laptop                   1  55000.00
+Monitor                  1  12000.00
+Headphones               1   2499.00
+Enter choice: 0
+Exiting CartForge.

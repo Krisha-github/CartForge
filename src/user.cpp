@@ -1,6 +1,10 @@
 #include "user.h"
+#include "db_connection.h"
+#include "utils.h"
+
 #include <iostream>
 #include <string>
+
 using namespace std;
 
 User::User(MYSQL *connection)
@@ -10,42 +14,28 @@ User::User(MYSQL *connection)
 
 void User::addUser()
 {
-    string name, email;
+    string name = util::readText("Enter user name: ", 100);
+    string email = util::readEmail("Enter email: ");
 
-    cin.ignore();
-    cout << "Enter user name: ";
-    getline(cin, name);
-    cout << "Enter email: ";
-    getline(cin, email);
+    Statement stmt(conn, "INSERT INTO users (name, email) VALUES (?, ?)");
 
-    string query = "INSERT INTO users (name, email) VALUES ('" + name + "', '" + email + "')";
-
-    if (mysql_query(conn, query.c_str()) == 0)
-        cout << "User added successfully.\n";
+    if (stmt.execute({name, email}))
+        cout << "User added successfully (ID " << stmt.insertId() << ").\n";
+    else if (stmt.errorCode() == dberr::DUPLICATE_ENTRY)
+        cout << "That e-mail address is already registered.\n";
     else
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Error: " << stmt.errorMessage() << endl;
 }
 
 void User::viewUsers()
 {
-    string query = "SELECT user_id, name, email FROM users";
+    Statement stmt(conn, "SELECT user_id, name, email FROM users ORDER BY user_id");
 
-    if (mysql_query(conn, query.c_str()) != 0)
+    if (!stmt.execute())
     {
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Error: " << stmt.errorMessage() << endl;
         return;
     }
 
-    MYSQL_RES *res = mysql_store_result(conn);
-    MYSQL_ROW row;
-
-    cout << "\nID | Name | Email\n";
-    cout << "-------------------------\n";
-
-    while ((row = mysql_fetch_row(res)))
-    {
-        cout << row[0] << " | " << row[1] << " | " << row[2] << endl;
-    }
-
-    mysql_free_result(res);
+    util::printTable({"ID", "Name", "Email"}, stmt.fetchAll());
 }

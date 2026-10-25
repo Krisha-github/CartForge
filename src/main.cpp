@@ -1,11 +1,34 @@
 #include <iostream>
+
 #include "db_connection.h"
 #include "product.h"
 #include "user.h"
 #include "cart.h"
 #include "order.h"
+#include "utils.h"
 
 using namespace std;
+
+static void printMenu()
+{
+    cout << "\n========== CartForge ==========\n";
+    cout << " 1. Add Product\n";
+    cout << " 2. View Products\n";
+    cout << " 3. Search Product\n";
+    cout << " 4. Update Product Stock\n";
+    cout << " 5. Delete Product\n";
+    cout << " 6. Add User\n";
+    cout << " 7. View Users\n";
+    cout << " 8. Add Product to Cart\n";
+    cout << " 9. View Cart\n";
+    cout << "10. Remove Item from Cart\n";
+    cout << "11. Place Order\n";
+    cout << "12. View Order History\n";
+    cout << "13. Low Stock Report\n";
+    cout << "14. Total Sales Report\n";
+    cout << "15. Top Selling Products\n";
+    cout << " 0. Exit\n";
+}
 
 int main()
 {
@@ -15,6 +38,8 @@ int main()
     if (!conn)
     {
         cout << "Could not connect to database. Exiting.\n";
+        cout << "(Set CARTFORGE_DB_HOST / _PORT / _USER / _PASSWORD / _NAME if your\n"
+                " MySQL settings differ from the defaults - see README.)\n";
         return 1;
     }
 
@@ -23,85 +48,72 @@ int main()
     Cart cart(conn);
     OrderManager orderManager(conn);
 
-    int choice;
+    int choice = -1;
 
-    do
+    try
     {
-        cout << "\n========== CartForge ==========\n";
-        cout << "1. Add Product\n";
-        cout << "2. View Products\n";
-        cout << "3. Search Product\n";
-        cout << "4. Update Product Stock\n";
-        cout << "5. Delete Product\n";
-        cout << "6. Add User\n";
-        cout << "7. View Users\n";
-        cout << "8. Add Product to Cart\n";
-        cout << "9. View Cart\n";
-        cout << "10. Remove Item from Cart\n";
-        cout << "11. Place Order\n";
-        cout << "12. View Order History\n";
-        cout << "13. Low Stock Report\n";
-        cout << "14. Total Sales Report\n";
-        cout << "15. Top Selling Products\n";
-        cout << "0. Exit\n";
-        cout << "Enter choice: ";
-        cin >> choice;
-
-        switch (choice)
+        do
         {
-        case 1:
-            product.addProduct();
-            break;
-        case 2:
-            product.viewProducts();
-            break;
-        case 3:
-            product.searchProduct();
-            break;
-        case 4:
-            product.updateStock();
-            break;
-        case 5:
-            product.deleteProduct();
-            break;
-        case 6:
-            user.addUser();
-            break;
-        case 7:
-            user.viewUsers();
-            break;
-        case 8:
-            cart.addToCart();
-            break;
-        case 9:
-            cart.viewCart();
-            break;
-        case 10:
-            cart.removeFromCart();
-            break;
-        case 11:
-            orderManager.placeOrder();
-            break;
-        case 12:
-            orderManager.viewOrderHistory();
-            break;
-        case 13:
-            orderManager.lowStockReport();
-            break;
-        case 14:
-            orderManager.totalSalesReport();
-            break;
-        case 15:
-            orderManager.topSellingProducts();
-            break;
-        case 0:
-            cout << "Exiting CartForge.\n";
-            break;
-        default:
-            cout << "Invalid choice.\n";
-        }
+            printMenu();
+            choice = util::readInt("Enter choice: ", 0, 15);
 
-    } while (choice != 0);
+            switch (choice)
+            {
+            case 1:
+                product.addProduct();
+                break;
+            case 2:
+                product.viewProducts();
+                break;
+            case 3:
+                product.searchProduct();
+                break;
+            case 4:
+                product.updateStock();
+                break;
+            case 5:
+                product.deleteProduct();
+                break;
+            case 6:
+                user.addUser();
+                break;
+            case 7:
+                user.viewUsers();
+                break;
+            case 8:
+                cart.addToCart();
+                break;
+            case 9:
+                cart.viewCart();
+                break;
+            case 10:
+                cart.removeFromCart();
+                break;
+            case 11:
+                orderManager.placeOrder();
+                break;
+            case 12:
+                orderManager.viewOrderHistory();
+                break;
+            case 13:
+                orderManager.lowStockReport();
+                break;
+            case 14:
+                orderManager.totalSalesReport();
+                break;
+            case 15:
+                orderManager.topSellingProducts();
+                break;
+            case 0:
+                cout << "Exiting CartForge.\n";
+                break;
+            }
+        } while (choice != 0);
+    }
+    catch (const InputClosed &)
+    {
+        cout << "\nInput closed. Exiting CartForge.\n";
+    }
 
     mysql_close(conn);
     return 0;

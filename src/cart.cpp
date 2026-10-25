@@ -1,6 +1,11 @@
 #include "cart.h"
+#include "db_connection.h"
+#include "utils.h"
+
+#include <climits>
 #include <iostream>
 #include <string>
+
 using namespace std;
 
 Cart::Cart(MYSQL *connection)
@@ -10,73 +15,94 @@ Cart::Cart(MYSQL *connection)
 
 void Cart::addToCart()
 {
-    int userId, productId, quantity;
+    int userId = util::readInt("Enter user ID: ", 1, INT_MAX);
+    int productId = util::readInt("Enter product ID: ", 1, INT_MAX);
+    int quantity = util::readInt("Enter quantity: ", 1, 100000);
 
-    cout << "Enter user ID: ";
-    cin >> userId;
-    cout << "Enter product ID: ";
-    cin >> productId;
-    cout << "Enter quantity: ";
-    cin >> quantity;
+    string uid = to_string(userId);
+    string pid = to_string(productId);
+    string qty = to_string(quantity);
 
-    string query =
-        "INSERT INTO cart_items (user_id, product_id, quantity) VALUES (" +
-        to_string(userId) + ", " + to_string(productId) + ", " + to_string(quantity) + ") "
-                                                                                       "ON DUPLICATE KEY UPDATE quantity = quantity + " +
-        to_string(quantity);
+    if (!rowExists(conn, "SELECT 1 FROM users WHERE user_id = ?", {uid}))
+    {
+        cout << "User " << userId << " does not exist.\n";
+        return;
+    }
 
-    if (mysql_query(conn, query.c_str()) == 0)
+    // Product must exist and be active; read its stock.
+    Statement prod(conn, "SELECT stock_quantity FROM products WHERE product_id = ? AND is_active = 1");
+    vector<string> row;
+    if (!prod.execute({pid}) || !prod.fetch(row))
+    {
+        cout << "Product " << productId << " does not exist or is no longer available.\n";
+        return;
+    }
+    long long stock = stoll(row[0]);
+
+    // How many are already in this user's cart?
+    long long inCart = 0;
+    Statement existing(conn, "SELECT quantity FROM cart_items WHERE user_id = ? AND product_id = ?");
+    if (existing.execute({uid, pid}) && existing.fetch(row))
+        inCart = stoll(row[0]);
+
+    if (inCart + quantity > stock)
+    {
+        cout << "Not enough stock: " << stock << " available, " << inCart
+             << " already in your cart.\n";
+        return;
+    }
+
+    Statement stmt(conn,
+                   "INSERT INTO cart_items (user_id, product_id, quantity) VALUES (?, ?, ?) "
+                   "ON DUPLICATE KEY UPDATE quantity = quantity + CAST(? AS SIGNED)");
+
+    if (stmt.execute({uid, pid, qty, qty}))
         cout << "Item added to cart.\n";
     else
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Error: " << stmt.errorMessage() << endl;
 }
 
 void Cart::viewCart()
 {
-    int userId;
+    int userId = util::readInt("Enter user ID: ", 1, INT_MAX);
+    string uid = to_string(userId);
 
-    cout << "Enter user ID: ";
-    cin >> userId;
+    Statement stmt(conn,
+                   "SELECT c.cart_id, p.product_name, c.quantity, p.price, "
+                   "(c.quantity * p.price) AS subtotal "
+                   "FROM cart_items c "
+                   "JOIN products p ON c.product_id = p.product_id "
+                   "WHERE c.user_id = ? ORDER BY c.cart_id");
 
-    string query =
-        "SELECT c.cart_id, p.product_name, c.quantity, p.price, "
-        "(c.quantity * p.price) AS subtotal "
-        "FROM cart_items c "
-        "JOIN products p ON c.product_id = p.product_id "
-        "WHERE c.user_id = " +
-        to_string(userId);
-
-    if (mysql_query(conn, query.c_str()) != 0)
+    if (!stmt.execute({uid}))
     {
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Error: " << stmt.errorMessage() << endl;
         return;
     }
 
-    MYSQL_RES *res = mysql_store_result(conn);
-    MYSQL_ROW row;
+    util::printTable({"Cart ID", "Product", "Qty", "Price", "Subtotal"}, stmt.fetchAll());
 
-    cout << "\nCart ID | Product | Qty | Price | Subtotal\n";
-    cout << "------------------------------------------\n";
-
-    while ((row = mysql_fetch_row(res)))
-    {
-        cout << row[0] << " | " << row[1] << " | " << row[2] << " | " << row[3] << " | " << row[4] << endl;
-    }
-
-    mysql_free_result(res);
+    Statement total(conn,
+                    "SELECT IFNULL(SUM(c.quantity * p.price), 0) "
+                    "FROM cart_items c JOIN products p ON c.product_id = p.product_id "
+                    "WHERE c.user_id = ?");
+    vector<string> row;
+    if (total.execute({uid}) && total.fetch(row))
+        cout << "\nCart total: " << row[0] << endl;
 }
 
 void Cart::removeFromCart()
 {
-    int cartId;
+    int userId = util::readInt("Enter user ID: ", 1, INT_MAX);
+    int cartId = util::readInt("Enter cart item ID to remove: ", 1, INT_MAX);
 
-    cout << "Enter cart item ID to remove: ";
-    cin >> cartId;
+    // Both IDs are required so a user can only remove items from their own cart.
+    Statement stmt(conn, "DELETE FROM cart_items WHERE cart_id = ? AND user_id = ?");
 
-    string query = "DELETE FROM cart_items WHERE cart_id = " + to_string(cartId);
-
-    if (mysql_query(conn, query.c_str()) == 0)
-        cout << "Item removed from cart.\n";
+    if (!stmt.execute({to_string(cartId), to_string(userId)}))
+        cout << "Error: " << stmt.errorMessage() << endl;
+    else if (stmt.affectedRows() == 0)
+        cout << "No such item in that user's cart.\n";
     else
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Item removed from cart.\n";
 }

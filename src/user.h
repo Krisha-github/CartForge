@@ -9,7 +9,7 @@ private:
     MYSQL *conn;
 
 public:
-    User(MYSQL *connection);
+    explicit User(MYSQL *connection);
 
     void addUser();
     void viewUsers();

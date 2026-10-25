@@ -1,6 +1,11 @@
 #include "product.h"
+#include "db_connection.h"
+#include "utils.h"
+
+#include <climits>
 #include <iostream>
 #include <string>
+
 using namespace std;
 
 Product::Product(MYSQL *connection)
@@ -10,109 +15,114 @@ Product::Product(MYSQL *connection)
 
 void Product::addProduct()
 {
-    string name;
-    double price;
-    int stock;
+    string name = util::readText("Enter product name: ", 100);
+    string price = util::readMoney("Enter price: ");
+    int stock = util::readInt("Enter stock quantity: ", 0, 1000000);
 
-    cin.ignore();
-    cout << "Enter product name: ";
-    getline(cin, name);
-    cout << "Enter price: ";
-    cin >> price;
-    cout << "Enter stock quantity: ";
-    cin >> stock;
+    Statement stmt(conn,
+                   "INSERT INTO products (product_name, price, stock_quantity) VALUES (?, ?, ?)");
 
-    string query = "INSERT INTO products (product_name, price, stock_quantity) VALUES ('" +
-                   name + "', " + to_string(price) + ", " + to_string(stock) + ")";
-
-    if (mysql_query(conn, query.c_str()) == 0)
-        cout << "Product added successfully.\n";
+    if (stmt.execute({name, price, to_string(stock)}))
+        cout << "Product added successfully (ID " << stmt.insertId() << ").\n";
     else
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Error: " << stmt.errorMessage() << endl;
 }
 
 void Product::viewProducts()
 {
-    string query = "SELECT product_id, product_name, price, stock_quantity FROM products";
+    Statement stmt(conn,
+                   "SELECT product_id, product_name, price, stock_quantity "
+                   "FROM products WHERE is_active = 1 ORDER BY product_id");
 
-    if (mysql_query(conn, query.c_str()) != 0)
+    if (!stmt.execute())
     {
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Error: " << stmt.errorMessage() << endl;
         return;
     }
 
-    MYSQL_RES *res = mysql_store_result(conn);
-    MYSQL_ROW row;
-
-    cout << "\nID | Product | Price | Stock\n";
-    cout << "--------------------------------\n";
-
-    while ((row = mysql_fetch_row(res)))
-    {
-        cout << row[0] << " | " << row[1] << " | " << row[2] << " | " << row[3] << endl;
-    }
-
-    mysql_free_result(res);
+    util::printTable({"ID", "Product", "Price", "Stock"}, stmt.fetchAll());
 }
 
 void Product::searchProduct()
 {
-    string keyword;
+    string keyword = util::readText("Enter product keyword: ", 100);
 
-    cin.ignore();
-    cout << "Enter product keyword: ";
-    getline(cin, keyword);
+    Statement stmt(conn,
+                   "SELECT product_id, product_name, price, stock_quantity "
+                   "FROM products "
+                   "WHERE is_active = 1 AND product_name LIKE CONCAT('%', ?, '%') ESCAPE '|' "
+                   "ORDER BY product_id");
 
-    string query = "SELECT product_id, product_name, price, stock_quantity FROM products "
-                   "WHERE product_name LIKE '%" +
-                   keyword + "%'";
+    if (!stmt.execute({util::escapeLike(keyword)}))
+    {
+        cout << "Error: " << stmt.errorMessage() << endl;
+        return;
+    }
 
-    if (mysql_query(conn, query.c_str()) != 0)
+    util::printTable({"ID", "Product", "Price", "Stock"}, stmt.fetchAll());
+}
+
+void Product::updateStock()
+{
+    int productId = util::readInt("Enter product ID: ", 1, INT_MAX);
+    int stock = util::readInt("Enter new stock quantity: ", 0, 1000000);
+
+    Statement stmt(conn,
+                   "UPDATE products SET stock_quantity = ? "
+                   "WHERE product_id = ? AND is_active = 1");
+
+    if (!stmt.execute({to_string(stock), to_string(productId)}))
+        cout << "Error: " << stmt.errorMessage() << endl;
+    else if (stmt.affectedRows() == 0)
+        cout << "No active product with ID " << productId << ".\n";
+    else
+        cout << "Stock updated successfully.\n";
+}
+
+void Product::deleteProduct()
+{
+    int productId = util::readInt("Enter product ID to delete: ", 1, INT_MAX);
+    string id = to_string(productId);
+
+    if (!rowExists(conn, "SELECT 1 FROM products WHERE product_id = ? AND is_active = 1", {id}))
+    {
+        cout << "No active product with ID " << productId << ".\n";
+        return;
+    }
+
+    // Try a real delete first. If the product was ever ordered, the foreign key
+    // (ON DELETE RESTRICT on order_items) blocks it - then we archive instead,
+    // so past orders and sales reports are never damaged.
+    Statement del(conn, "DELETE FROM products WHERE product_id = ?");
+    if (del.execute({id}))
+    {
+        cout << "Product deleted successfully.\n";
+        return;
+    }
+
+    if (del.errorCode() != dberr::ROW_IS_REFERENCED)
+    {
+        cout << "Error: " << del.errorMessage() << endl;
+        return;
+    }
+
+    if (mysql_query(conn, "START TRANSACTION") != 0)
     {
         cout << "Error: " << mysql_error(conn) << endl;
         return;
     }
 
-    MYSQL_RES *res = mysql_store_result(conn);
-    MYSQL_ROW row;
+    Statement clearCarts(conn, "DELETE FROM cart_items WHERE product_id = ?");
+    Statement archive(conn, "UPDATE products SET is_active = 0 WHERE product_id = ?");
 
-    while ((row = mysql_fetch_row(res)))
+    if (clearCarts.execute({id}) && archive.execute({id}) && mysql_query(conn, "COMMIT") == 0)
     {
-        cout << row[0] << " | " << row[1] << " | " << row[2] << " | " << row[3] << endl;
+        cout << "Product has order history, so it was archived instead of deleted.\n"
+                "It no longer appears in listings or carts; past orders are unchanged.\n";
     }
-
-    mysql_free_result(res);
-}
-
-void Product::updateStock()
-{
-    int productId, stock;
-
-    cout << "Enter product ID: ";
-    cin >> productId;
-    cout << "Enter new stock quantity: ";
-    cin >> stock;
-
-    string query = "UPDATE products SET stock_quantity = " + to_string(stock) +
-                   " WHERE product_id = " + to_string(productId);
-
-    if (mysql_query(conn, query.c_str()) == 0)
-        cout << "Stock updated successfully.\n";
     else
-        cout << "Error: " << mysql_error(conn) << endl;
-}
-
-void Product::deleteProduct()
-{
-    int productId;
-
-    cout << "Enter product ID to delete: ";
-    cin >> productId;
-
-    string query = "DELETE FROM products WHERE product_id = " + to_string(productId);
-
-    if (mysql_query(conn, query.c_str()) == 0)
-        cout << "Product deleted successfully.\n";
-    else
-        cout << "Error: " << mysql_error(conn) << endl;
+    {
+        mysql_query(conn, "ROLLBACK");
+        cout << "Error archiving product.\n";
+    }
 }

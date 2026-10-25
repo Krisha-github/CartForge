@@ -1,255 +1,274 @@
 #include "order.h"
+#include "db_connection.h"
+#include "utils.h"
+
+#include <climits>
 #include <iostream>
 #include <string>
 #include <vector>
+
 using namespace std;
 
-struct CartOrderItem
+namespace
 {
-    int productId;
-    int quantity;
-    int stock;
-    double price;
-};
+    struct OrderLine
+    {
+        string productId;
+        string name;
+        string quantity;
+        string price; // DECIMAL kept as text -> exact money arithmetic in SQL
+    };
+}
 
 OrderManager::OrderManager(MYSQL *connection)
 {
     conn = connection;
 }
 
-void OrderManager::placeOrder()
+// ---------------------------------------------------------------------------
+// Transaction-safe checkout
+//
+//   1. START TRANSACTION
+//   2. Lock the user's cart rows                        (SELECT ... FOR UPDATE)
+//   3. Lock each product row, lowest product_id first   (SELECT ... FOR UPDATE)
+//   4. Validate every line against the locked stock
+//   5. Insert the order and its order_items (price snapshot)
+//   6. Deduct stock
+//   7. Compute the order total in SQL
+//   8. Clear the cart
+//   9. COMMIT          - any failure above => ROLLBACK
+//
+// Products are always locked in ascending product_id order, so two checkouts
+// with overlapping products queue up instead of deadlocking. A second buyer of
+// the last item waits on the row lock, then sees the reduced stock and is
+// rejected - overselling is impossible.
+// ---------------------------------------------------------------------------
+OrderManager::Result OrderManager::attemptOrder(const string &userId)
 {
-    int userId;
-    cout << "Enter user ID: ";
-    cin >> userId;
+    Result r;
+
+    auto abort = [&](Outcome outcome, const string &message, unsigned int errCode = 0) -> Result
+    {
+        mysql_query(conn, "ROLLBACK");
+        r.outcome = (errCode == dberr::DEADLOCK) ? Outcome::Deadlock : outcome;
+        r.message = message;
+        return r;
+    };
 
     if (mysql_query(conn, "START TRANSACTION") != 0)
+        return abort(Outcome::Error, string("Could not start transaction: ") + mysql_error(conn));
+
+    // 2. Lock the cart rows (unique index (user_id, product_id) yields them in product_id order).
+    Statement cartStmt(conn,
+                       "SELECT product_id, quantity FROM cart_items "
+                       "WHERE user_id = ? ORDER BY product_id FOR UPDATE");
+    if (!cartStmt.execute({userId}))
+        return abort(Outcome::Error, "Error reading cart: " + cartStmt.errorMessage(), cartStmt.errorCode());
+
+    vector<vector<string>> cartRows = cartStmt.fetchAll();
+    if (cartRows.empty())
+        return abort(Outcome::Rejected, "Cart is empty. Cannot place order.");
+
+    // 3 + 4. Lock each product row in order, then validate it.
+    Statement productStmt(conn,
+                          "SELECT product_name, price, stock_quantity, is_active "
+                          "FROM products WHERE product_id = ? FOR UPDATE");
+    vector<OrderLine> lines;
+
+    for (const auto &cartRow : cartRows)
     {
-        cout << "Could not start transaction: " << mysql_error(conn) << endl;
-        return;
+        if (!productStmt.execute({cartRow[0]}))
+            return abort(Outcome::Error, "Error locking product: " + productStmt.errorMessage(),
+                         productStmt.errorCode());
+
+        vector<string> p;
+        if (!productStmt.fetch(p))
+            return abort(Outcome::Rejected, "Product " + cartRow[0] + " no longer exists.");
+
+        long long wanted = stoll(cartRow[1]);
+        long long stock = stoll(p[2]);
+
+        if (p[3] != "1")
+            return abort(Outcome::Rejected,
+                         "'" + p[0] + "' is no longer available. Remove it from the cart.");
+
+        if (stock < wanted)
+            return abort(Outcome::Rejected,
+                         "Insufficient stock for '" + p[0] + "': requested " + cartRow[1] +
+                             ", available " + p[2] + ".");
+
+        lines.push_back({cartRow[0], p[0], cartRow[1], p[1]});
     }
 
-    string cartQuery =
-        "SELECT c.product_id, c.quantity, p.stock_quantity, p.price "
-        "FROM cart_items c "
-        "JOIN products p ON c.product_id = p.product_id "
-        "WHERE c.user_id = " +
-        to_string(userId) + " FOR UPDATE";
+    // 5. Create the order and its line items.
+    Statement orderStmt(conn, "INSERT INTO orders (user_id) VALUES (?)");
+    if (!orderStmt.execute({userId}))
+        return abort(Outcome::Error, "Error creating order: " + orderStmt.errorMessage(),
+                     orderStmt.errorCode());
+    r.orderId = to_string(orderStmt.insertId());
 
-    if (mysql_query(conn, cartQuery.c_str()) != 0)
+    Statement itemStmt(conn,
+                       "INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase) "
+                       "VALUES (?, ?, ?, ?)");
+    Statement stockStmt(conn,
+                        "UPDATE products SET stock_quantity = stock_quantity - CAST(? AS SIGNED) "
+                        "WHERE product_id = ?");
+
+    for (const auto &line : lines)
     {
-        cout << "Error checking cart: " << mysql_error(conn) << endl;
-        mysql_query(conn, "ROLLBACK");
-        return;
+        if (!itemStmt.execute({r.orderId, line.productId, line.quantity, line.price}))
+            return abort(Outcome::Error, "Error inserting order item: " + itemStmt.errorMessage(),
+                         itemStmt.errorCode());
+
+        // 6. Deduct inventory (the CHECK constraint is a second safety net).
+        if (!stockStmt.execute({line.quantity, line.productId}))
+            return abort(Outcome::Error, "Error updating stock: " + stockStmt.errorMessage(),
+                         stockStmt.errorCode());
     }
 
-    MYSQL_RES *res = mysql_store_result(conn);
-    MYSQL_ROW row;
+    // 7. Total computed by MySQL from the saved line items (exact DECIMAL maths).
+    Statement totalStmt(conn,
+                        "UPDATE orders SET total_amount = "
+                        "(SELECT IFNULL(SUM(quantity * price_at_purchase), 0) "
+                        " FROM order_items WHERE order_id = ?) "
+                        "WHERE order_id = ?");
+    if (!totalStmt.execute({r.orderId, r.orderId}))
+        return abort(Outcome::Error, "Error computing total: " + totalStmt.errorMessage(),
+                     totalStmt.errorCode());
 
-    vector<CartOrderItem> items;
-    double totalAmount = 0;
+    // 8. Empty the cart.
+    Statement clearStmt(conn, "DELETE FROM cart_items WHERE user_id = ?");
+    if (!clearStmt.execute({userId}))
+        return abort(Outcome::Error, "Error clearing cart: " + clearStmt.errorMessage(),
+                     clearStmt.errorCode());
 
-    while ((row = mysql_fetch_row(res)))
-    {
-        CartOrderItem item;
-        item.productId = stoi(row[0]);
-        item.quantity = stoi(row[1]);
-        item.stock = stoi(row[2]);
-        item.price = stod(row[3]);
+    // Read the total back while still inside the transaction.
+    Statement readTotal(conn, "SELECT total_amount FROM orders WHERE order_id = ?");
+    vector<string> row;
+    if (readTotal.execute({r.orderId}) && readTotal.fetch(row))
+        r.total = row[0];
 
-        if (item.stock < item.quantity)
-        {
-            cout << "Insufficient stock for product ID " << item.productId << endl;
-            mysql_free_result(res);
-            mysql_query(conn, "ROLLBACK");
-            cout << "Transaction rolled back.\n";
-            return;
-        }
-
-        totalAmount += item.quantity * item.price;
-        items.push_back(item);
-    }
-
-    mysql_free_result(res);
-
-    if (items.empty())
-    {
-        cout << "Cart is empty. Cannot place order.\n";
-        mysql_query(conn, "ROLLBACK");
-        return;
-    }
-
-    string orderQuery =
-        "INSERT INTO orders (user_id, total_amount) VALUES (" +
-        to_string(userId) + ", " + to_string(totalAmount) + ")";
-
-    if (mysql_query(conn, orderQuery.c_str()) != 0)
-    {
-        cout << "Error creating order: " << mysql_error(conn) << endl;
-        mysql_query(conn, "ROLLBACK");
-        return;
-    }
-
-    int orderId = (int)mysql_insert_id(conn);
-
-    for (auto item : items)
-    {
-        string itemQuery =
-            "INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase) VALUES (" +
-            to_string(orderId) + ", " +
-            to_string(item.productId) + ", " +
-            to_string(item.quantity) + ", " +
-            to_string(item.price) + ")";
-
-        if (mysql_query(conn, itemQuery.c_str()) != 0)
-        {
-            cout << "Error inserting order item: " << mysql_error(conn) << endl;
-            mysql_query(conn, "ROLLBACK");
-            return;
-        }
-
-        string stockQuery =
-            "UPDATE products SET stock_quantity = stock_quantity - " +
-            to_string(item.quantity) +
-            " WHERE product_id = " + to_string(item.productId);
-
-        if (mysql_query(conn, stockQuery.c_str()) != 0)
-        {
-            cout << "Error updating stock: " << mysql_error(conn) << endl;
-            mysql_query(conn, "ROLLBACK");
-            return;
-        }
-    }
-
-    string clearCartQuery = "DELETE FROM cart_items WHERE user_id = " + to_string(userId);
-
-    if (mysql_query(conn, clearCartQuery.c_str()) != 0)
-    {
-        cout << "Error clearing cart: " << mysql_error(conn) << endl;
-        mysql_query(conn, "ROLLBACK");
-        return;
-    }
-
+    // 9. Commit.
     if (mysql_query(conn, "COMMIT") != 0)
+        return abort(Outcome::Error, string("Commit failed: ") + mysql_error(conn),
+                     mysql_errno(conn));
+
+    r.outcome = Outcome::Success;
+    return r;
+}
+
+void OrderManager::placeOrder()
+{
+    int userId = util::readInt("Enter user ID: ", 1, INT_MAX);
+    string uid = to_string(userId);
+
+    if (!rowExists(conn, "SELECT 1 FROM users WHERE user_id = ?", {uid}))
     {
-        cout << "Commit failed: " << mysql_error(conn) << endl;
-        mysql_query(conn, "ROLLBACK");
+        cout << "User " << userId << " does not exist.\n";
         return;
     }
 
-    cout << "Order placed successfully. Order ID: " << orderId << endl;
-    cout << "Total amount: " << totalAmount << endl;
+    const int maxAttempts = 3;
+    Result result;
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt)
+    {
+        result = attemptOrder(uid);
+        if (result.outcome != Outcome::Deadlock)
+            break;
+        cout << "Deadlock detected, retrying (" << attempt << "/" << maxAttempts << ")...\n";
+    }
+
+    if (result.outcome == Outcome::Success)
+    {
+        cout << "Order placed successfully. Order ID: " << result.orderId << endl;
+        cout << "Total amount: " << result.total << endl;
+    }
+    else
+    {
+        cout << result.message << endl;
+        cout << "Transaction rolled back. Nothing was changed.\n";
+    }
 }
 
 void OrderManager::viewOrderHistory()
 {
-    int userId;
-    cout << "Enter user ID: ";
-    cin >> userId;
+    int userId = util::readInt("Enter user ID: ", 1, INT_MAX);
 
-    string query =
-        "SELECT o.order_id, o.order_date, p.product_name, oi.quantity, oi.price_at_purchase "
-        "FROM orders o "
-        "JOIN order_items oi ON o.order_id = oi.order_id "
-        "JOIN products p ON oi.product_id = p.product_id "
-        "WHERE o.user_id = " +
-        to_string(userId) +
-        " ORDER BY o.order_date DESC";
+    Statement stmt(conn,
+                   "SELECT o.order_id, o.order_date, p.product_name, oi.quantity, "
+                   "oi.price_at_purchase, (oi.quantity * oi.price_at_purchase) AS line_total "
+                   "FROM orders o "
+                   "JOIN order_items oi ON o.order_id = oi.order_id "
+                   "JOIN products p ON oi.product_id = p.product_id "
+                   "WHERE o.user_id = ? "
+                   "ORDER BY o.order_date DESC, o.order_id DESC, oi.order_item_id");
 
-    if (mysql_query(conn, query.c_str()) != 0)
+    if (!stmt.execute({to_string(userId)}))
     {
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Error: " << stmt.errorMessage() << endl;
         return;
     }
 
-    MYSQL_RES *res = mysql_store_result(conn);
-    MYSQL_ROW row;
+    util::printTable({"Order ID", "Date", "Product", "Qty", "Price", "Line total"}, stmt.fetchAll());
 
-    cout << "\nOrder ID | Date | Product | Qty | Price\n";
-    cout << "----------------------------------------\n";
-
-    while ((row = mysql_fetch_row(res)))
-    {
-        cout << row[0] << " | " << row[1] << " | " << row[2] << " | " << row[3] << " | " << row[4] << endl;
-    }
-
-    mysql_free_result(res);
+    Statement spent(conn,
+                    "SELECT COUNT(*), IFNULL(SUM(total_amount), 0) FROM orders WHERE user_id = ?");
+    vector<string> row;
+    if (spent.execute({to_string(userId)}) && spent.fetch(row))
+        cout << "\nOrders: " << row[0] << "   Lifetime spend: " << row[1] << endl;
 }
 
 void OrderManager::lowStockReport()
 {
-    int threshold;
-    cout << "Enter low stock threshold: ";
-    cin >> threshold;
+    int threshold = util::readInt("Enter low stock threshold: ", 0, 1000000);
 
-    string query =
-        "SELECT product_id, product_name, stock_quantity "
-        "FROM products WHERE stock_quantity < " +
-        to_string(threshold);
+    Statement stmt(conn,
+                   "SELECT product_id, product_name, stock_quantity "
+                   "FROM products WHERE is_active = 1 AND stock_quantity < ? "
+                   "ORDER BY stock_quantity, product_id");
 
-    if (mysql_query(conn, query.c_str()) != 0)
+    if (!stmt.execute({to_string(threshold)}))
     {
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Error: " << stmt.errorMessage() << endl;
         return;
     }
 
-    MYSQL_RES *res = mysql_store_result(conn);
-    MYSQL_ROW row;
-
-    cout << "\nLow Stock Products\n";
-    cout << "------------------\n";
-
-    while ((row = mysql_fetch_row(res)))
-    {
-        cout << row[0] << " | " << row[1] << " | Stock: " << row[2] << endl;
-    }
-
-    mysql_free_result(res);
+    cout << "\nLow Stock Products (stock below " << threshold << ")";
+    util::printTable({"ID", "Product", "Stock"}, stmt.fetchAll());
 }
 
 void OrderManager::totalSalesReport()
 {
-    string query = "SELECT IFNULL(SUM(total_amount), 0) FROM orders";
+    Statement stmt(conn, "SELECT COUNT(*), IFNULL(SUM(total_amount), 0) FROM orders");
 
-    if (mysql_query(conn, query.c_str()) != 0)
+    vector<string> row;
+    if (!stmt.execute() || !stmt.fetch(row))
     {
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Error: " << stmt.errorMessage() << endl;
         return;
     }
 
-    MYSQL_RES *res = mysql_store_result(conn);
-    MYSQL_ROW row = mysql_fetch_row(res);
-
-    cout << "Total sales: " << row[0] << endl;
-
-    mysql_free_result(res);
+    cout << "Orders placed: " << row[0] << endl;
+    cout << "Total sales: " << row[1] << endl;
 }
 
 void OrderManager::topSellingProducts()
 {
-    string query =
-        "SELECT p.product_name, SUM(oi.quantity) AS total_sold "
-        "FROM order_items oi "
-        "JOIN products p ON oi.product_id = p.product_id "
-        "GROUP BY p.product_id, p.product_name "
-        "ORDER BY total_sold DESC";
+    Statement stmt(conn,
+                   "SELECT p.product_name, SUM(oi.quantity) AS units_sold, "
+                   "SUM(oi.quantity * oi.price_at_purchase) AS revenue "
+                   "FROM order_items oi "
+                   "JOIN products p ON oi.product_id = p.product_id "
+                   "GROUP BY p.product_id, p.product_name "
+                   "ORDER BY units_sold DESC, revenue DESC "
+                   "LIMIT 10");
 
-    if (mysql_query(conn, query.c_str()) != 0)
+    if (!stmt.execute())
     {
-        cout << "Error: " << mysql_error(conn) << endl;
+        cout << "Error: " << stmt.errorMessage() << endl;
         return;
     }
 
-    MYSQL_RES *res = mysql_store_result(conn);
-    MYSQL_ROW row;
-
-    cout << "\nTop Selling Products\n";
-    cout << "--------------------\n";
-
-    while ((row = mysql_fetch_row(res)))
-    {
-        cout << row[0] << " | Sold: " << row[1] << endl;
-    }
-
-    mysql_free_result(res);
+    cout << "\nTop Selling Products";
+    util::printTable({"Product", "Units sold", "Revenue"}, stmt.fetchAll());
 }

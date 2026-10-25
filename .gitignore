@@ -1,5 +1,11 @@
+# build output
+build/
+cartforge
 *.exe
 *.dll
 *.o
 *.obj
+
+# editors
 .vscode/
+.idea/

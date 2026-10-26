@@ -226,7 +226,7 @@ WHERE  p.is_active = 0;
 --    Commented out because it changes data. To try it: add an item to
 --    user 1's cart, then copy the statements below into MySQL Workbench.
 -- ============================================================
-/*
+
 START TRANSACTION;
 
 -- 1. Lock the user's cart rows
@@ -269,7 +269,6 @@ WHERE  order_id = @order_id;
 DELETE FROM cart_items WHERE user_id = 1;
 
 COMMIT;      -- or ROLLBACK; to undo everything above
-*/
 
 
 -- ============================================================
@@ -277,7 +276,7 @@ COMMIT;      -- or ROLLBACK; to undo everything above
 --    Open two connections (two query tabs in Workbench).
 --    Setup:  UPDATE products SET stock_quantity = 1 WHERE product_id = 1;
 -- ============================================================
-/*
+
 -- ---- Session A ----                       -- ---- Session B ----
 START TRANSACTION;
 SELECT stock_quantity FROM products
@@ -293,4 +292,4 @@ COMMIT;                            -- lock released
                                             -- B now unblocks and sees 0:
                                             -- stock 0 < quantity 1 => ROLLBACK.
                                             -- The last item was sold exactly once.
-*/
+
